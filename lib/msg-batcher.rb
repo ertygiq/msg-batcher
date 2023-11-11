@@ -35,9 +35,12 @@ class MsgBatcher
     start_timer
   end
 
-  def kill
+  def kill(blocking: true)
     @closed = true
-    @timer_thread.exit
+    # releasing timer thread
+    @timer_start_cv.signal
+    @timer_release_cv.signal
+    @timer_thread.join if blocking
   end
 
   # Thread-safe
@@ -126,12 +129,15 @@ class MsgBatcher
 
         dputs "TT1"
         @timer_start_cv.wait @m2
+        break if @closed
+
         dputs "TT1 after wait"
         @timer_started_cv.signal
 
         dputs "TT2"
         # then wait either time to elapse or signal that data has been released
         @timer_release_cv.wait @m2, @max_time_msecs / 1000.0
+        break if @closed
 
         dputs "timer end #{@m2.owned?}"
 
