@@ -36,17 +36,25 @@ class MsgBatcher
   end
 
   def kill(blocking: true)
-    @closed = true
-    # releasing timer thread
-    @timer_start_cv.signal
-    @timer_release_cv.signal
-    @timer_thread.join if blocking
+    # no #push will interfere
+    @m.synchronize do
+      # want to make sure that timer thread is in a waiting position. Hence, acquiring @m2
+      @m2.synchronize do
+        @closed = true
+        # releasing timer thread
+        @timer_start_cv.signal
+        # This can happen, however, that timer thread will wait timeout on @timer_release_cv.
+        # If it was waiting on @timer_start_cv. Because timer thread won't reach @timer_release_cv wait poisition
+        @timer_release_cv.signal
+      end
+      @timer_thread.join if blocking
+    end
   end
 
   # Thread-safe
   # @raise [Error] when invoked when batcher has been closed
   def push(entry)
-    raise Error, "Batcher is closed - cannot push" if @closed
+    raise Error, 'Batcher is closed - cannot push' if @closed
 
     @m.lock
     @m2.lock
@@ -81,7 +89,7 @@ class MsgBatcher
     @storage = []
 
     @already_released = true
-    dputs "kill timer"
+    dputs 'kill timer'
     @timer_release_cv.signal # informing timer that release is happening
 
     # Now interesting happens
@@ -94,12 +102,20 @@ class MsgBatcher
     # So now we can be sure that timer is at the beginning, ready to wait for @timer_start_cv signal.
 
     if from_push
-      dputs "--------before wait m2"
+      dputs '--------before wait m2'
       @timer_full_cycle_cv.wait @m2
       @m2.unlock
-      dputs "-----22222"
+      dputs '-----22222'
       @m.unlock
-      dputs "---- unlock all"
+      dputs '---- unlock all'
+    end
+
+    if temp.empty?
+      # The situation when the batch is empty should not happen.
+      # However, when the batcher is killed and the timer thread is forced to finish this can happen
+      # In any case, just ignoring this empty batch and do not call callback on it
+      warn 'MsgBatcher: empty batch. This should not have happened' unless @closed
+      return
     end
 
     begin
@@ -119,34 +135,28 @@ class MsgBatcher
         @already_released = false
         # informing release that timer is at the beginning
         @timer_full_cycle_cv.signal
-        dputs "sdlkfjsd"
-
-
+        dputs 'sdlkfjsd'
 
         # Position: TT1
         # Wait for invocation from push
         # Each release invocation finishes when timer thread are below (waiting for @timer_start_cv)
-
-        dputs "TT1"
+        dputs 'TT1'
         @timer_start_cv.wait @m2
-        break if @closed
 
-        dputs "TT1 after wait"
+        dputs 'TT1 after wait'
         @timer_started_cv.signal
 
-        dputs "TT2"
+        dputs 'TT2'
         # then wait either time to elapse or signal that data has been released
         @timer_release_cv.wait @m2, @max_time_msecs / 1000.0
-        break if @closed
-
         dputs "timer end #{@m2.owned?}"
-
         # @m2 is locked here!
-
         unless @already_released
           dputs "timer's release"
           release(false)
         end
+
+        break if @closed
       end
     end
     # wait for timer to be in waiting state
